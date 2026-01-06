@@ -210,8 +210,15 @@ class ProgressDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
         
+        # Set wait cursor on parent
+        parent.config(cursor="wait")
+        self.config(cursor="wait")
+        
         self.total = total
         self.current = 0
+        self.last_update_time = 0
+        self.update_interval = 0.05  # 50ms throttling
+        self.parent_widget = parent
         
         ttk.Label(self, text=title, font=("Segoe UI", 11, "bold")).pack(pady=(15, 5))
         
@@ -223,13 +230,24 @@ class ProgressDialog(tk.Toplevel):
         
         self.protocol("WM_DELETE_WINDOW", lambda: None)  # Prevent closing
     
+    def set_maximum(self, new_max):
+        """Update the maximum value of the progress bar."""
+        self.total = new_max
+        self.progress.config(maximum=new_max)
+    
     def update_progress(self, current, status_text):
         self.current = current
-        self.progress['value'] = current
-        self.status_var.set(f"{status_text} ({current}/{self.total})")
-        self.update()
+        now = time.time()
+        # Throttle updates to prevent UI freezing
+        if now - self.last_update_time > self.update_interval or current == self.total:
+            self.progress['value'] = current
+            self.status_var.set(f"{status_text} ({current}/{self.total})")
+            self.last_update_time = now
+            self.update_idletasks()
     
     def complete(self):
+        # Restore default cursor
+        self.parent_widget.config(cursor="")
         self.destroy()
 
 # ==================== DUPLICATE FINDER DIALOG ====================
@@ -237,15 +255,33 @@ class ProgressDialog(tk.Toplevel):
 import re
 
 def get_base_name(filename):
-    """Extract base name without suffixes like (1), - Copy, _copy. E.g., 'photo - Copy (1).jpg' -> 'photo'"""
+    """Extract base name without suffixes like (1), - Copy, _copy, .copy, or trailing numbers.
+    Examples:
+        'photo - Copy (1).jpg' -> 'photo'
+        'readme(1).md' -> 'readme'
+        'readme 1.md' -> 'readme'
+        'readme.copy.md' -> 'readme'
+        'document_2.pdf' -> 'document'
+    """
     name, ext = os.path.splitext(filename)
-    # 1. Remove (1), (2) suffixes
+    
+    # 1. Remove .copy suffix (before extension, e.g., "file.copy.txt" has name="file.copy")
+    name = re.sub(r'\.copy$', '', name, flags=re.IGNORECASE)
+    
+    # 2. Remove (1), (2) suffixes
     name = re.sub(r'\s*\(\d+\)\s*$', '', name)
-    # 2. Remove " - Copy", " _copy", etc.
+    
+    # 3. Remove " - Copy", " _copy", "-copy", etc.
     name = re.sub(r'[\s_-]+[Cc]opy\s*$', '', name)
-    # 3. Clean up trailing spaces or dashes
+    
+    # 4. Remove trailing " 1", " 2", "_1", "_2", "-1", "-2" (space/underscore/dash + number)
+    name = re.sub(r'[\s_-]+\d+$', '', name)
+    
+    # 5. Clean up trailing spaces, dashes, or underscores
     name = name.strip().rstrip('-_ ')
+    
     return name, ext
+
 
 class DuplicateFinderDialog(tk.Toplevel):
     def __init__(self, parent, all_files, parent_app=None):
@@ -432,6 +468,7 @@ class FileOrganizerApp:
         self.current_path = os.path.expanduser("~")
         self.scanned_files = []
         self.all_items = []  # Store all items including folders
+        self.undo_history = []  # Stack of move operations: list of (source, dest) tuples
         
         self.setup_styles()
         self.create_widgets()
@@ -532,8 +569,13 @@ class FileOrganizerApp:
         
         self.btn_analyze = ttk.Button(bottom_frame, text="Analyze", command=self.scan_folder)
         self.btn_analyze.pack(side=tk.LEFT, padx=3)
+        self.btn_setup = ttk.Button(bottom_frame, text="Setup Folders", command=self.setup_category_folders)
+        self.btn_setup.pack(side=tk.LEFT, padx=3)
         self.btn_organize = ttk.Button(bottom_frame, text="Organize", command=self.organize_files)
         self.btn_organize.pack(side=tk.LEFT, padx=3)
+        self.btn_undo = ttk.Button(bottom_frame, text="Undo", command=self.undo_last_action, state=tk.DISABLED)
+        self.btn_undo.pack(side=tk.LEFT, padx=3)
+
         self.btn_recycle = ttk.Button(bottom_frame, text="Recycle", command=lambda: self.delete_selected(permanent=False))
         self.btn_recycle.pack(side=tk.LEFT, padx=3)
         self.btn_delete = ttk.Button(bottom_frame, text="Delete", command=lambda: self.delete_selected(permanent=True))
@@ -543,6 +585,7 @@ class FileOrganizerApp:
         
         self.status_var = tk.StringVar()
         ttk.Label(bottom_frame, textvariable=self.status_var, font=("Consolas", 9)).pack(side=tk.RIGHT)
+
 
     def update_ui_text(self):
         """Update all UI text based on current language."""
@@ -630,31 +673,115 @@ class FileOrganizerApp:
             
             # 2. Background Scan: Start thread for folder sizes and recursive search
             self.status_var.set("🔍 Đang quét toàn bộ thư mục con...")
+            self.root.config(cursor="wait")
+            
+            # Show scanning info in Properties panel
+            t = I18N[self.lang]
+            scan_info = f"""⌛ SCANNING...
+            
+Folder:
+{path}
+
+Status: Initializing...
+"""
+            self.info_text.config(state=tk.NORMAL)
+            self.info_text.delete("1.0", tk.END)
+            self.info_text.insert(tk.END, scan_info)
+            self.info_text.config(state=tk.DISABLED)
+            
             Thread(target=self._background_scan, args=(path,), daemon=True).start()
             
         except Exception as e:
+            self.root.config(cursor="")
             messagebox.showerror("Lỗi", str(e))
 
     def _background_scan(self, path):
-        """Heavy lifting inside a thread."""
+        """Heavy lifting inside a thread: One-pass scan for performance."""
         temp_scanned = []
         folder_size_map = {}
+        total_bytes = 0
+        category_counts = {cat: 0 for cat in EXTENSION_MAP.keys()}
+        category_counts["Khác"] = 0
         
-        # Recursive Scan for scanned_files list
-        for root, dirs, files in os.walk(path):
-            for f in files:
-                temp_scanned.append(os.path.join(root, f))
+        # Define category folder names to exclude from scanning
+        category_folders = set(EXTENSION_MAP.keys()) | {"Others", "Khác"}
         
-        # Calculate sizes for visible folders
-        for item in self.all_items:
-            if item["is_dir"]:
-                folder_size_map[item["id"]] = get_folder_size(item["path"])
+        # 1. Map visible item IDs to paths for fast lookup
+        visible_dirs = {item["path"]: item["id"] for item in self.all_items if item["is_dir"]}
+        dir_sizes = {item["id"]: 0 for item in self.all_items if item["is_dir"]}
 
-        # Update UI safely
-        self.root.after(0, lambda: self._scan_complete(temp_scanned, folder_size_map))
+        # 2. Optimized single-pass walk
+        try:
+            for root, dirs, files in os.walk(path):
+                # Skip category folders (already organized files)
+                # Only skip them if they're direct children of the current path
+                if root == path:
+                    dirs[:] = [d for d in dirs if d not in category_folders]
+                
+                # Calculate folder sizes for visible folders
+                # If root is a subpath of a visible dir, add its file sizes to that visible dir
+                active_visible_ids = []
+                for v_path, v_id in visible_dirs.items():
+                    if root.startswith(v_path):
+                        active_visible_ids.append(v_id)
 
-    def _scan_complete(self, scanned_files, folder_sizes):
-        """Update UI with final scan results."""
+                for f in files:
+                    fp = os.path.join(root, f)
+                    temp_scanned.append(fp)
+                    
+                    # Update UI every 100 files for progress feedback
+                    if len(temp_scanned) % 100 == 0:
+                        current_folder = os.path.basename(root) if root != path else "(root)"
+                        scan_msg = f"""⌛ SCANNING...
+
+Folder:
+{path}
+
+Current: {current_folder}
+Scanned: {len(temp_scanned)} files
+"""
+                        self.root.after(0, lambda msg=scan_msg: self._update_scan_progress(msg))
+                    
+                    try:
+                        f_size = os.path.getsize(fp)
+                        total_bytes += f_size
+                        
+                        # Update category counts
+                        ext = pathlib.Path(f).suffix.lower()
+                        found = False
+                        for cat, exts in EXTENSION_MAP.items():
+                            if ext in exts:
+                                category_counts[cat] += 1
+                                found = True
+                                break
+                        if not found:
+                            category_counts["Khác"] += 1
+                            
+                        # Update visible folder sizes
+                        for v_id in active_visible_ids:
+                            dir_sizes[v_id] += f_size
+                            
+                    except (OSError, PermissionError):
+                        pass
+
+        except Exception as e:
+            print(f"Scan error: {e}")
+
+        # Update UI safely with all pre-calculated data
+        self.root.after(0, lambda: self._scan_complete(temp_scanned, dir_sizes, total_bytes, category_counts))
+
+    def _update_scan_progress(self, message):
+        """Update Properties panel with scan progress."""
+        try:
+            self.info_text.config(state=tk.NORMAL)
+            self.info_text.delete("1.0", tk.END)
+            self.info_text.insert(tk.END, message)
+            self.info_text.config(state=tk.DISABLED)
+        except:
+            pass
+
+    def _scan_complete(self, scanned_files, folder_sizes, total_size, category_counts):
+        """Update UI with final scan results - zero logic, only display."""
         self.scanned_files = scanned_files
         
         # Update folder sizes in tree
@@ -664,9 +791,22 @@ class FileOrganizerApp:
                 current_values[1] = format_size(size)
                 self.tree.item(item_id, values=tuple(current_values))
         
-        total_size = sum(os.path.getsize(f) for f in scanned_files if os.path.exists(f))
         self.status_var.set(f"📂 Quét xong | {len(scanned_files)} file | Tổng: {format_size(total_size)}")
-        self.scan_folder()
+        
+        # Prepare Analysis Report
+        report = "📊 KẾT QUẢ QUÉT\n" + "="*30 + "\n"
+        for cat, count in category_counts.items():
+            report += f"  • {cat}: {count} file\n"
+        report += f"\n📁 Tổng cộng: {len(self.scanned_files)} file"
+        
+        self.info_text.config(state=tk.NORMAL)
+        self.info_text.delete("1.0", tk.END)
+        self.info_text.insert(tk.END, report)
+        self.info_text.config(state=tk.DISABLED)
+        
+        # Restore default cursor
+        self.root.config(cursor="")
+
     
     def on_item_double_click(self, event):
         item = self.tree.selection()
@@ -693,11 +833,26 @@ class FileOrganizerApp:
             is_dir = os.path.isdir(target)
             
             if is_dir:
-                folder_size = get_folder_size(target)
-                file_count = sum(1 for root, dirs, files in os.walk(target) for _ in files)
-                dir_count = sum(1 for root, dirs, files in os.walk(target) for _ in dirs)
+                # Optimized: Using a lightweight thread for folder stats if it's too deep
+                # For now, let's use a faster way to count (only if really needed)
+                # But we'll just show basics first if it's a huge folder
+                info = f"[{t['prop_dir']}]\n{os.path.basename(target)}\n\n{t['status_ready']}..."
+                self.info_text.insert(tk.END, info)
                 
-                info = f"""[{t['prop_dir']}]
+                def load_folder_stats():
+                    try:
+                        folder_size = 0
+                        file_count = 0
+                        dir_count = 0
+                        for root, dirs, files in os.walk(target):
+                            dir_count += len(dirs)
+                            file_count += len(files)
+                            for f in files:
+                                try:
+                                    folder_size += os.path.getsize(os.path.join(root, f))
+                                except OSError: pass
+                                
+                        full_info = f"""[{t['prop_dir']}]
 {os.path.basename(target)}
 
 {t['prop_capacity']}:
@@ -712,9 +867,12 @@ class FileOrganizerApp:
 {t['prop_modified']}:
 {format_date(stat.st_mtime)}
 """
+                        self.root.after(0, lambda: self._update_info_panel(full_info, item_id[0]))
+                    except Exception: pass
+
+                Thread(target=load_folder_stats, daemon=True).start()
             else:
                 imp, reason = get_importance(target)
-                # Translate importance label
                 imp_label = t[f'importance_{imp.lower()}'] if f'importance_{imp.lower()}' in t else imp
                 advice = t['advice_keep'] if imp == "High" else t['advice_delete']
                 
@@ -736,12 +894,20 @@ class FileOrganizerApp:
 {t['prop_advice']}:
 {advice}
 """
-            
-            self.info_text.insert(tk.END, info)
+                self.info_text.insert(tk.END, info)
         except Exception:
             self.info_text.insert(tk.END, t['info_select'])
             
         self.info_text.config(state=tk.DISABLED)
+
+    def _update_info_panel(self, text, original_item_id):
+        """Thread-safe update for the info panel, only if same item still selected."""
+        current_sel = self.tree.selection()
+        if current_sel and current_sel[0] == original_item_id:
+            self.info_text.config(state=tk.NORMAL)
+            self.info_text.delete(1.0, tk.END)
+            self.info_text.insert(tk.END, text)
+            self.info_text.config(state=tk.DISABLED)
     
     def scan_folder(self):
         categories = {cat: 0 for cat in EXTENSION_MAP.keys()}
@@ -768,7 +934,54 @@ class FileOrganizerApp:
         self.info_text.insert(tk.END, report)
         self.info_text.config(state=tk.DISABLED)
     
+    def get_existing_folder(self, base_path, category_name):
+        """Find existing folder with same name (case-insensitive), or return standard name."""
+        try:
+            existing_items = os.listdir(base_path)
+            for item in existing_items:
+                item_path = os.path.join(base_path, item)
+                if os.path.isdir(item_path) and item.lower() == category_name.lower():
+                    return item  # Return actual folder name (preserves case)
+        except:
+            pass
+        return category_name  # Return standard name if not found
+    
+    def setup_category_folders(self):
+        """Create category folders (Images, Documents, etc.) in current directory."""
+        t = I18N[self.lang]
+        confirm_msg = "Tạo các thư mục phân loại (Images, Documents, v.v.) trong thư mục hiện tại?" if self.lang == 'vi' else "Create category folders (Images, Documents, etc.) in current directory?"
+        
+        if not messagebox.askyesno(t['title'], confirm_msg):
+            return
+        
+        created = []
+        skipped = []
+        
+        category_names = list(EXTENSION_MAP.keys()) + ["Others"]
+        
+        for category in category_names:
+            folder_path = os.path.join(self.current_path, category)
+            try:
+                if not os.path.exists(folder_path):
+                    os.makedirs(folder_path)
+                    created.append(category)
+                else:
+                    skipped.append(category)
+            except Exception as e:
+                print(f"Error creating {category}: {e}")
+        
+        # Show result
+        result_msg = ""
+        if created:
+            result_msg += f"✅ Đã tạo: {', '.join(created)}\n" if self.lang == 'vi' else f"✅ Created: {', '.join(created)}\n"
+        if skipped:
+            result_msg += f"⏭️ Đã tồn tại: {', '.join(skipped)}" if self.lang == 'vi' else f"⏭️ Already exists: {', '.join(skipped)}"
+        
+        messagebox.showinfo(t['title'], result_msg or ("Hoàn tất!" if self.lang == 'vi' else "Complete!"))
+        self.browse_path(self.current_path)  # Refresh view
+    
     def organize_files(self):
+
         """Smart organize: starts a background thread."""
         t = I18N[self.lang]
         if not messagebox.askyesno(t['title'], t['confirm_organize'].format(path=self.current_path)):
@@ -789,9 +1002,27 @@ class FileOrganizerApp:
     def _run_organize(self, name_groups, progress):
         """Background worker for organizing files."""
         moved = 0
-        total_files = sum(len(files) for files in name_groups.values())
         
+        # name_groups contains ALL files grouped by base name (from scanned_files).
+        # This ensures we detect duplicates even across subfolders.
+        # However, we only MOVE files that are directly in the current_path.
+        
+        # 1. Calculate how many files we will actually move (for progress bar)
+        total_items = 0
         for key, file_list in name_groups.items():
+            for fp in file_list:
+                if os.path.dirname(fp) == self.current_path:
+                    total_items += 1
+        
+        # Update progress bar max
+        self.root.after(0, lambda: progress.set_maximum(total_items))
+        progress.total = total_items
+        if total_items == 0:
+            self.root.after(0, lambda: self._on_organize_complete(progress, 0))
+            return
+
+        for key, file_list in name_groups.items():
+            # Determine target category based on extension
             fp_sample = file_list[0]
             ext_raw = pathlib.Path(fp_sample).suffix.lower()
             target_cat = "Others"
@@ -800,8 +1031,12 @@ class FileOrganizerApp:
                     target_cat = cat
                     break
             
-            cat_dir = os.path.join(self.current_path, target_cat)
+            # Use existing folder (case-insensitive) if exists, otherwise use standard name
+            actual_cat_name = self.get_existing_folder(self.current_path, target_cat)
+            cat_dir = os.path.join(self.current_path, actual_cat_name)
             
+            # If there are multiple files with the same base name (duplicates),
+            # create a subfolder named after the base name.
             if len(file_list) > 1:
                 base, ext = get_base_name(os.path.basename(fp_sample))
                 target_dir = os.path.join(cat_dir, base)
@@ -809,10 +1044,15 @@ class FileOrganizerApp:
                 target_dir = cat_dir
             
             os.makedirs(target_dir, exist_ok=True)
+
             
+            # Only move files that are directly in the current folder
             for fp in file_list:
+                if os.path.dirname(fp) != self.current_path:
+                    continue  # Skip files already in subfolders
+                    
                 # Update progress safely
-                self.root.after(0, lambda f=fp, m=moved: progress.update_progress(m + 1, os.path.basename(f)[:30]))
+                progress.update_progress(moved + 1, os.path.basename(fp)[:30])
                 
                 destination = os.path.join(target_dir, os.path.basename(fp))
                 if os.path.exists(destination):
@@ -824,6 +1064,8 @@ class FileOrganizerApp:
                 
                 try:
                     shutil.move(fp, destination)
+                    # Record the move for undo
+                    self.undo_history.append((fp, destination))
                     moved += 1
                 except Exception:
                     pass
@@ -832,12 +1074,18 @@ class FileOrganizerApp:
         self._cleanup_empty_folders(self.current_path)
         self.root.after(0, lambda: self._on_organize_complete(progress, moved))
 
+
+
     def _on_organize_complete(self, progress, moved):
         """Finalize UI after organization."""
         t = I18N[self.lang]
         progress.complete()
         messagebox.showinfo(t['title'], t['success_organize'].format(count=moved))
+        # Enable Undo button if there are moves to undo
+        if self.undo_history:
+            self.btn_undo.config(state=tk.NORMAL)
         self.browse_path(self.current_path)
+
 
     def _cleanup_empty_folders(self, path):
         """Recursively remove empty folders."""
@@ -915,6 +1163,65 @@ class FileOrganizerApp:
         messagebox.showinfo(success_title, result_msg)
         self.browse_path(self.current_path)
     
+    def undo_last_action(self):
+        """Undo all moves from the last organization."""
+        t = I18N[self.lang]
+        if not self.undo_history:
+            messagebox.showinfo(t['title'], "Không có thao tác nào để hoàn tác." if self.lang == 'vi' else "No actions to undo.")
+            return
+        
+        undo_msg = "Hoàn tác {} thao tác di chuyển?" if self.lang == 'vi' else "Undo {} move operations?"
+        if not messagebox.askyesno(t['title'], undo_msg.format(len(self.undo_history))):
+            return
+        
+        progress = ProgressDialog(self.root, "Undo" if self.lang == 'en' else "Hoàn tác", len(self.undo_history))
+        Thread(target=self._run_undo, args=(progress,), daemon=True).start()
+
+    def _run_undo(self, progress):
+        """Background worker for undoing file moves."""
+        undone = 0
+        errors = []
+        
+        # Reverse the history (most recent moves first)
+        for i, (original_path, current_path) in enumerate(reversed(self.undo_history)):
+            progress.update_progress(i + 1, os.path.basename(current_path)[:30])
+            
+            try:
+                # Ensure the original directory exists
+                original_dir = os.path.dirname(original_path)
+                os.makedirs(original_dir, exist_ok=True)
+                
+                # Move file back to original location
+                if os.path.exists(current_path):
+                    shutil.move(current_path, original_path)
+                    undone += 1
+            except Exception as e:
+                errors.append(f"{os.path.basename(current_path)}: {str(e)}")
+        
+        # Clear history after undo
+        self.undo_history.clear()
+        
+        # Cleanup empty folders created by organization
+        self._cleanup_empty_folders(self.current_path)
+        
+        self.root.after(0, lambda: self._on_undo_complete(progress, undone, errors))
+
+    def _on_undo_complete(self, progress, undone, errors):
+        """Finalize UI after undo."""
+        t = I18N[self.lang]
+        progress.complete()
+        
+        success_msg = f"Đã hoàn tác {undone} thao tác." if self.lang == 'vi' else f"Undid {undone} operations."
+        if errors:
+            err_title = "\n\nLỗi:" if self.lang == 'vi' else "\n\nErrors:"
+            success_msg += f"{err_title}\n" + "\n".join(errors[:3])
+        
+        messagebox.showinfo(t['title'], success_msg)
+        
+        # Disable Undo button since history is cleared
+        self.btn_undo.config(state=tk.DISABLED)
+        self.browse_path(self.current_path)
+
     def find_duplicates(self):
         """Find duplicate files based on name grouping."""
         if len(self.scanned_files) < 2:
@@ -922,6 +1229,7 @@ class FileOrganizerApp:
             return
         
         DuplicateFinderDialog(self.root, self.scanned_files, parent_app=self)
+
 
 # ==================== MAIN ====================
 

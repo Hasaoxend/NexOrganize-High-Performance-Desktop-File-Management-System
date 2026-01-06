@@ -4,25 +4,25 @@
 
 ---
 
-## ✨ Tính năng mới v2.0
+## Tính năng mới v2.0
 
-### 🚀 Hiệu suất cao
+### Hiệu suất cao
 - **Single-pass scanning**: Quét 8,000+ file trong vài giây
 - **Throttled progress**: Thanh tiến trình mượt mà, không treo UI
 - **Async folder loading**: Xem thông tin thư mục không làm đứng app
 - **Smart scan exclusion**: Bỏ qua thư mục đã phân loại (Images/, Documents/, etc.)
 
-### ↩️ Undo (Hoàn tác)
+### Undo (Hoàn tác)
 - Ghi lại toàn bộ lịch sử di chuyển file
 - Khôi phục một cú click về trạng thái ban đầu
 - Tự động dọn dẹp thư mục rỗng sau khi undo
 
-### 📁 Setup Folders (Kiểu IDM)
+### Setup Folders (Kiểu IDM)
 - Nút "Setup Folders" tạo sẵn thư mục phân loại
 - Tự động sử dụng thư mục có sẵn (không phân biệt hoa/thường)
 - Workflow rõ ràng: Setup → Organize → Find Duplicates
 
-### 🔍 Nhận diện trùng lặp nâng cao
+### Nhận diện trùng lặp nâng cao
 Nhận diện tất cả các pattern:
 - `readme.md`, `readme(1).md`, `readme(2).md`
 - `readme 1.md`, `readme 2.md`, `readme_1.md`
@@ -30,7 +30,7 @@ Nhận diện tất cả các pattern:
 
 Tất cả sẽ được nhóm vào thư mục `Documents/readme/`
 
-### 📊 Hiển thị tiến trình quét
+### Hiển thị tiến trình quét
 Panel Properties hiển thị real-time:
 ```
 ⌛ SCANNING...
@@ -39,14 +39,14 @@ Current: Images
 Scanned: 1,234 files
 ```
 
-### 🎨 Cải thiện giao diện
+### Cải thiện giao diện
 - Biểu tượng đồng hồ cát khi quét/sắp xếp
 - Chặn thao tác vô tình trong lúc xử lý
 - Cập nhật tiến trình mỗi 100 file
 
 ---
 
-## 🏗 Kiến trúc và Luồng xử lý
+## Kiến trúc và Luồng xử lý
 
 ### 1. Luồng logic phân loại (System Workflow)
 Sơ đồ mô tả quy trình từ khi người dùng chọn thư mục đến khi hoàn tất tổ chức lại cấu trúc tệp tin.
@@ -87,7 +87,7 @@ sequenceDiagram
 
 ---
 
-## 🛠 Cơ chế hoạt động và Logic lõi
+## Cơ chế hoạt động và Logic lõi
 
 ### 1. Quét đệ quy tối ưu (Optimized Recursive Scanning)
 - Sử dụng `os.walk` với single-pass để duyệt toàn bộ cấu trúc
@@ -133,7 +133,7 @@ Khi di chuyển tệp tin vào thư mục đích:
 
 ---
 
-## 📋 Workflow sử dụng
+## Workflow sử dụng
 
 1. **Setup Folders** (Lần đầu): Click "Setup Folders" → Tạo 7 thư mục category
 2. **Organize**: Click "Organize" → File tự động phân loại + nhóm trùng lặp
@@ -142,7 +142,7 @@ Khi di chuyển tệp tin vào thư mục đích:
 
 ---
 
-## 🎯 Tính năng chính
+## Tính năng chính
 
 - **Chuyển đổi Ngôn ngữ**: Hệ thống I18N hỗ trợ Tiếng Anh và Tiếng Việt
 - **Chế độ Giao diện**: Dark/Light mode, điều chỉnh đồng bộ
@@ -152,7 +152,7 @@ Khi di chuyển tệp tin vào thư mục đích:
 
 ---
 
-## 🚀 Cài đặt và Khởi chạy
+## Cài đặt và Khởi chạy
 
 1. **Yêu cầu**: Python 3.8+
 2. **Cài đặt thư viện**: `pip install -r requirements.txt`
@@ -160,7 +160,7 @@ Khi di chuyển tệp tin vào thư mục đích:
 
 ---
 
-## 📊 Performance
+## Performance
 
 - ✅ Quét 8,000+ files: < 5 giây
 - ✅ UI responsive: Không bao giờ treo
